@@ -1,12 +1,13 @@
 pragma solidity ^0.4.17;
 
 import "zeppelin-solidity/contracts/ownership/HasNoEther.sol";
+import "zeppelin-solidity/contracts/MerkleProof.sol";
 
 
 contract Certificate is HasNoEther {
     /// A batch certificate issue
-    struct Issue {
-        uint merkleRoot;
+    struct Batch {
+        bytes32 merkleRoot;
         /// Block number of issue
         uint blockNumber;
     }
@@ -17,72 +18,151 @@ contract Certificate is HasNoEther {
     /// for the details needed
     /// We can
     ///
-    /// XXX: Presumably when revoking, we have to check the Issue batch that the certificate was
+    /// XXX: Presumably when revoking, we have to check the Batch batch that the certificate was
     /// part of (including the merkle tree), and then check that the revocation sender is actually
     /// the issuer of the certificate in question.
     struct Revocation {
+        // Hash of the certificate being revoked
+        bytes32 hash;
+        // Merkle root of the batch
+        bytes32 batchMerkleRoot;
         /// Block number of revocation
         uint blockNumber;
-        string id;
-        string revocationReason;
+        uint revocationReason;
     }
 
     /// An Issuer
     struct Issuer {
-        Issue[] issues;
+        Batch[] batches;
         Revocation[] revocations;
 
-        /// Mapping from merkel root to index in issues list
+        /// Mapping from merkel root to index in batches list
         /// Danger: an unissued merkle root hash will always point to zero, so we better check
-        mapping(uint => uint) merkleToIndex;
+        mapping(bytes32 => uint) merkleToBatch;
+
+        /// Mapping from revoked hash to index in revocation list
+        mapping(bytes32 => uint) hashToRevocationIndex;
     }
 
-    /// Mapping of issuer to their issues
+    /// Mapping of issuer to their batches
     mapping(address => Issuer) issuers;
 
-    function getIssued(address _issuer, uint merkleRoot) internal view returns(Issue storage _issue) {
+    /// Retrieve the issue struct and also verifies it actually has been issued
+    function getBatch(address _issuer, bytes32 merkleRoot) internal view returns(Batch storage _issue) {
         Issuer storage issuer = issuers[_issuer];
-        uint index = issuer.merkleToIndex[merkleRoot];
-        require(issuer.issues.length > index);
-        _issue = issuer.issues[index];
+        uint index = issuer.merkleToBatch[merkleRoot];
+        require(issuer.batches.length > index);
+        _issue = issuer.batches[index];
         require(_issue.merkleRoot == merkleRoot);
         return _issue;
     }
 
-    modifier notIssued(address _issuer, uint merkleRoot) {
+    function isBatchIssued(address _issuer, bytes32 merkleRoot) internal view returns(bool) {
         Issuer storage issuer = issuers[_issuer];
-        uint index = issuer.merkleToIndex[merkleRoot];
-        if (issuer.issues.length > index) {
-            Issue storage _issue = issuer.issues[index];
-            require(_issue.merkleRoot != merkleRoot);
+        uint index = issuer.merkleToBatch[merkleRoot];
+        if (issuer.batches.length > index) {
+            Batch storage _issue = issuer.batches[index];
+            return _issue.merkleRoot == merkleRoot;
+        } else {
+            return false;
         }
+    }
+
+    modifier batchNotIssued(address _issuer, bytes32 merkleRoot) {
+        require(!isBatchIssued(_issuer, merkleRoot));
         _;
     }
 
-    modifier onlyIssued(address _issuer, uint merkleRoot) {
-        getIssued(_issuer, merkleRoot);
+    modifier onlyIssuedBatch(address _issuer, bytes32 merkleRoot) {
+        getBatch(_issuer, merkleRoot);
         _;
     }
 
-    function Certificate() public {
-    }
-
-    function issue(uint merkleRoot) public notIssued(msg.sender, merkleRoot) returns(uint) {
-        Issue memory _issue = Issue(merkleRoot, block.number);
+    function issueBatch(bytes32 merkleRoot) public batchNotIssued(msg.sender, merkleRoot) returns(uint) {
+        Batch memory _issue = Batch(merkleRoot, block.number);
         Issuer storage issuer = issuers[msg.sender];
 
-        uint index = issuer.issues.push(_issue) - 1;
-        issuer.merkleToIndex[merkleRoot] = index;
+        uint index = issuer.batches.push(_issue) - 1;
+        issuer.merkleToBatch[merkleRoot] = index;
 
         return index;
     }
 
-    function getIssuedCount(address issuer) public view returns(uint) {
-        return issuers[issuer].issues.length;
+    function getIssuedBatchesCount(address issuer) public view returns(uint) {
+        return issuers[issuer].batches.length;
     }
 
-    function getIssuedBlockNumber(address issuer, uint merkleRoot) public view returns(uint) {
-        Issue storage _issue = getIssued(issuer, merkleRoot);
+    function getIssuedBatchBlockNumber(address issuer, bytes32 merkleRoot) public view returns(uint) {
+        Batch storage _issue = getBatch(issuer, merkleRoot);
         return _issue.blockNumber;
+    }
+
+    /// Verify that something has been issued by issuer as part of a batch
+    /// and that the merkle root is correct and exists
+    function verifyIssued(address _issuer, bytes32 merkleRoot, bytes32 hash, bytes proof) public onlyIssuedBatch(_issuer, merkleRoot) view returns(bool) {
+        return MerkleProof.verifyProof(proof, merkleRoot, hash);
+    }
+
+    /// Certificate was issued as part of a batch
+    modifier onlyIssued(address _issuer, bytes32 merkleRoot, bytes32 hash, bytes proof) {
+        require(verifyIssued(_issuer, merkleRoot, hash, proof));
+        _;
+    }
+
+    function getRevocation(address _issuer, bytes32 hash) internal view returns(Revocation storage _revocation) {
+        Issuer storage issuer = issuers[_issuer];
+        uint index = issuer.hashToRevocationIndex[hash];
+        require(issuer.revocations.length > index);
+        _revocation = issuer.revocations[index];
+        require(_revocation.hash == hash);
+        return _revocation;
+    }
+
+    function isRevoked(address _issuer, bytes32 hash) internal view returns(bool) {
+        Issuer storage issuer = issuers[_issuer];
+        uint index = issuer.hashToRevocationIndex[hash];
+        if (issuer.revocations.length > index) {
+            Revocation storage _revocation = issuer.revocations[index];
+            return _revocation.hash == hash;
+        } else {
+            return false;
+        }
+    }
+
+    modifier onlyRevoked(address _issuer, bytes32 hash) {
+        getRevocation(_issuer, hash);
+        _;
+    }
+
+    modifier notRevoked(address _issuer, bytes32 hash) {
+        require(!isRevoked(_issuer, hash));
+        _;
+    }
+
+    /// Issued, merkle root matches, and not revoked
+    modifier onlyVerified(address _issuer, bytes32 merkleRoot, bytes32 hash, bytes proof) {
+        require(verifyIssued(_issuer, merkleRoot, hash, proof));
+        require(!isRevoked(_issuer, hash));
+        _;
+    }
+
+    /// Verify that something is issued by some issuer and that proofs and the merkle root exist
+    /// Also check that it has not been revoked
+    function verify(address _issuer, bytes32 merkleRoot, bytes32 hash, bytes proof) public onlyVerified(_issuer, merkleRoot, hash, proof) returns(bool) {
+        return true;
+    }
+
+    // Revoke a certificate
+    function revoke(bytes32 merkleRoot, bytes32 hash, uint reason, bytes proof) public onlyVerified(msg.sender, merkleRoot, hash, proof) returns(uint) {
+        Revocation memory _revocation = Revocation(hash, merkleRoot, block.number, reason);
+        Issuer storage issuer = issuers[msg.sender];
+
+        uint index = issuer.revocations.push(_revocation) - 1;
+        issuer.hashToRevocationIndex[hash] = index;
+
+        return index;
+    }
+
+    function Certificate() public {
     }
 }
