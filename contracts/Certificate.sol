@@ -1,7 +1,6 @@
 pragma solidity ^0.4.17;
 
 import "zeppelin-solidity/contracts/ownership/HasNoEther.sol";
-import "zeppelin-solidity/contracts/MerkleProof.sol";
 
 
 contract Certificate is HasNoEther {
@@ -74,7 +73,7 @@ contract Certificate is HasNoEther {
     }
 
     modifier onlyIssuedBatch(address _issuer, bytes32 merkleRoot) {
-        getBatch(_issuer, merkleRoot);
+        require(isBatchIssued(_issuer, merkleRoot));
         _;
     }
 
@@ -95,18 +94,6 @@ contract Certificate is HasNoEther {
     function getIssuedBatchBlockNumber(address issuer, bytes32 merkleRoot) public view returns(uint) {
         Batch storage _issue = getBatch(issuer, merkleRoot);
         return _issue.blockNumber;
-    }
-
-    /// Verify that something has been issued by issuer as part of a batch
-    /// and that the merkle root is correct and exists
-    function verifyIssued(address _issuer, bytes32 merkleRoot, bytes32 hash, bytes proof) public onlyIssuedBatch(_issuer, merkleRoot) view returns(bool) {
-        return MerkleProof.verifyProof(proof, merkleRoot, hash);
-    }
-
-    /// Certificate was issued as part of a batch
-    modifier onlyIssued(address _issuer, bytes32 merkleRoot, bytes32 hash, bytes proof) {
-        require(verifyIssued(_issuer, merkleRoot, hash, proof));
-        _;
     }
 
     function getRevocation(address _issuer, bytes32 hash) internal view returns(Revocation storage _revocation) {
@@ -130,7 +117,7 @@ contract Certificate is HasNoEther {
     }
 
     modifier onlyRevoked(address _issuer, bytes32 hash) {
-        getRevocation(_issuer, hash);
+        require(isRevoked(_issuer, hash));
         _;
     }
 
@@ -141,24 +128,47 @@ contract Certificate is HasNoEther {
 
     /// Issued, merkle root matches, and hash not revoked
     modifier onlyVerified(address _issuer, bytes32 merkleRoot, bytes32 hash, bytes proof) {
-        require(verifyIssued(_issuer, merkleRoot, hash, proof));
-        require(!isRevoked(_issuer, hash));
+        require(verify(_issuer, merkleRoot, hash, proof));
         _;
     }
 
     /// Verify that something is issued by some issuer and that proofs and the merkle root exist
     /// Also check that it has not been revoked
-    function verify(address _issuer, bytes32 merkleRoot, bytes32 hash, bytes proof) public view onlyVerified(_issuer, merkleRoot, hash, proof) returns(bool) {
-        // We need to check that all the proof provided are also not revoked
+    /// Modified from https://github.com/OpenZeppelin/zeppelin-solidity/blob/master/contracts/MerkleProof.sol
+    function verify(address _issuer, bytes32 merkleRoot, bytes32 hash, bytes proof) public view returns(bool) {
+        if (!isBatchIssued(_issuer, merkleRoot)) {
+            return false;
+        }
+
+        // Check if proof length is a multiple of 32
+        if (proof.length % 32 != 0) {
+            return false;
+        }
+
         bytes32 proofElement;
+        bytes32 computedHash = hash;
+
         for (uint256 i = 32; i <= proof.length; i += 32) {
             assembly {
                 // Load the current element of the proof
                 proofElement := mload(add(proof, i))
             }
-            require(!isRevoked(_issuer, proofElement));
+
+            if (computedHash < proofElement) {
+                // Hash(current computed hash + current element of the proof)
+                computedHash = keccak256(computedHash, proofElement);
+            } else {
+                // Hash(current element of the proof + current computed hash)
+                computedHash = keccak256(proofElement, computedHash);
+            }
+
+            if (isRevoked(_issuer, computedHash)) {
+                return false;
+            }
         }
-        return true;
+
+        // Check if the computed hash (root) is equal to the provided root
+        return computedHash == merkleRoot;
     }
 
     /// Revoke a certificate.
