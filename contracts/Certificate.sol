@@ -139,7 +139,7 @@ contract Certificate is HasNoEther {
         _;
     }
 
-    /// Issued, merkle root matches, and not revoked
+    /// Issued, merkle root matches, and hash not revoked
     modifier onlyVerified(address _issuer, bytes32 merkleRoot, bytes32 hash, bytes proof) {
         require(verifyIssued(_issuer, merkleRoot, hash, proof));
         require(!isRevoked(_issuer, hash));
@@ -148,11 +148,22 @@ contract Certificate is HasNoEther {
 
     /// Verify that something is issued by some issuer and that proofs and the merkle root exist
     /// Also check that it has not been revoked
-    function verify(address _issuer, bytes32 merkleRoot, bytes32 hash, bytes proof) public onlyVerified(_issuer, merkleRoot, hash, proof) returns(bool) {
+    function verify(address _issuer, bytes32 merkleRoot, bytes32 hash, bytes proof) public view onlyVerified(_issuer, merkleRoot, hash, proof) returns(bool) {
+        // We need to check that all the proof provided are also not revoked
+        bytes32 proofElement;
+        for (uint256 i = 32; i <= proof.length; i += 32) {
+            assembly {
+                // Load the current element of the proof
+                proofElement := mload(add(proof, i))
+            }
+            require(!isRevoked(_issuer, proofElement));
+        }
         return true;
     }
 
-    // Revoke a certificate
+    /// Revoke a certificate.
+    /// Generaly, issuers should only really revoke the "top" hash of a single certificate, although, if they wish,
+    /// they can choose to revoke certain claims only. It will complicate certificate management though
     function revoke(bytes32 merkleRoot, bytes32 hash, uint reason, bytes proof) public onlyVerified(msg.sender, merkleRoot, hash, proof) returns(uint) {
         Revocation memory _revocation = Revocation(hash, merkleRoot, block.number, reason);
         Issuer storage issuer = issuers[msg.sender];
